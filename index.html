@@ -1,0 +1,326 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Golden Market</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=DM+Mono:ital,wght@0,300;0,400;0,500&display=swap');
+
+        body {
+            margin: 0;
+            padding: 0;
+            background: #000;
+            cursor: none;
+            font-family: 'DM Mono', monospace;
+            overflow-x: hidden;
+        }
+
+        /* 800vh scrollable area: Long enough for precision, short enough to not be tedious */
+        #stickyWrap {
+            height: 800vh;
+        }
+
+        #stickyInner {
+            position: sticky;
+            top: 0;
+            height: 100vh;
+            width: 100vw;
+            overflow: hidden;
+            background: #000;
+        }
+
+        #videoCanvas {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            object-fit: cover;
+            will-change: transform;
+        }
+
+        #cursorCanvas {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            pointer-events: none;
+            z-index: 10;
+        }
+
+        #hud {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100vw;
+            height: 100vh;
+            pointer-events: none;
+            z-index: 20;
+            display: flex;
+            flex-direction: column;
+            justify-content: space-between;
+            box-sizing: border-box;
+            padding: 32px;
+        }
+
+        .wordmark {
+            font-size: 11px;
+            color: rgba(255, 215, 0, 0.85);
+            letter-spacing: 0.3em;
+            opacity: 0;
+            animation: fadeIn 1.2s ease-out 0.3s forwards;
+            user-select: none;
+        }
+
+        @keyframes fadeIn {
+            to { opacity: 1; }
+        }
+
+        .progress-container {
+            position: absolute;
+            bottom: 32px;
+            left: 50%;
+            transform: translateX(-50%);
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .frame-number {
+            font-size: 9px;
+            color: rgba(255, 215, 0, 0.8);
+            user-select: none;
+        }
+
+        #scrollHint {
+            position: fixed;
+            bottom: 120px;
+            left: 50%;
+            transform: translateX(-50%);
+            z-index: 30;
+            pointer-events: none;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            gap: 6px;
+        }
+
+        .hint-text {
+            font-size: 10px;
+            color: rgba(255, 215, 0, 0.6);
+            letter-spacing: 0.1em;
+            user-select: none;
+        }
+
+        .hint-chevron {
+            color: rgba(255, 215, 0, 0.6);
+            font-size: 14px;
+            animation: bounce 1.4s ease-in-out infinite;
+        }
+
+        @keyframes bounce {
+            0%, 100% { transform: translateY(0); }
+            50% { transform: translateY(6px); }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            .hint-chevron {
+                animation: none;
+            }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="stickyWrap">
+        <div id="stickyInner">
+            <!-- 1280x720 matches the native video resolution for pixel-perfect drawing -->
+            <canvas id="videoCanvas" width="1280" height="720"></canvas>
+            
+            <canvas id="cursorCanvas"></canvas>
+            
+            <div id="hud">
+                <div class="wordmark">GOLDEN MARKET v3.0</div>
+                
+                <div class="progress-container">
+                    <svg width="64" height="64" viewBox="0 0 64 64">
+                        <circle cx="32" cy="32" r="26" fill="none" stroke="rgba(255,215,0,0.8)" stroke-width="2" id="progressArc" transform="rotate(-90 32 32)" />
+                    </svg>
+                    <div class="frame-number" id="frameNumber">0</div>
+                </div>
+            </div>
+
+            <div id="scrollHint">
+                <div class="hint-text">SCROLL TO SCRUB</div>
+                <div class="hint-chevron">▾</div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // Force the browser to start at the top on every refresh
+        if ('scrollRestoration' in history) {
+            history.scrollRestoration = 'manual';
+        }
+        window.scrollTo(0, 0);
+
+        const videoCanvas = document.getElementById('videoCanvas');
+        const vCtx = videoCanvas.getContext('2d');
+        const canvas = document.getElementById('cursorCanvas');
+        const ctx = canvas.getContext('2d');
+        const arc = document.getElementById('progressArc');
+        const frameDisplay = document.getElementById('frameNumber');
+        const scrollHint = document.getElementById('scrollHint');
+
+        // We extracted exactly 240 frames from the MP4 via ffmpeg
+        const frameCount = 240; 
+        const images = [];
+
+        // Preload all high-quality JPEGs directly into memory for ZERO jitter
+        for (let i = 1; i <= frameCount; i++) {
+            const img = new Image();
+            img.src = `./frames/frame_${i.toString().padStart(4, '0')}.jpg`;
+            images.push(img);
+        }
+
+        // Draw the very first frame to the canvas immediately when it's ready
+        images[0].onload = () => {
+            vCtx.drawImage(images[0], 0, 0, 1280, 720);
+        };
+
+        let displayProgress = 0;
+        let rawProgress = 0;
+        let smoothX = window.innerWidth / 2;
+        let smoothY = window.innerHeight / 2;
+        let mouseX = window.innerWidth / 2;
+        let mouseY = window.innerHeight / 2;
+        let hintHidden = false;
+
+        const circ = 2 * Math.PI * 26;
+        arc.style.strokeDasharray = circ;
+        arc.style.strokeDashoffset = circ;
+
+        window.addEventListener('mousemove', (e) => {
+            mouseX = e.clientX;
+            mouseY = e.clientY;
+        });
+
+        function resizeCanvas() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+        }
+
+        const ro = new ResizeObserver(resizeCanvas);
+        ro.observe(document.body);
+        resizeCanvas();
+
+        const mql = window.matchMedia('(prefers-reduced-motion: reduce)');
+
+        let lastTime = performance.now();
+
+        function loop(time) {
+            // Delta time calculation for frame-rate independent physics
+            const dt = Math.min(time - lastTime, 50) || 16; // default 16ms if undefined
+            lastTime = time;
+
+            const scrollHeight = Math.max(document.documentElement.scrollHeight, document.body.scrollHeight);
+            const scrollable = scrollHeight - window.innerHeight;
+            const sy = window.scrollY;
+            
+            if (sy > 40 && !hintHidden) {
+                scrollHint.style.opacity = '0';
+                hintHidden = true;
+            }
+            
+            if (scrollable > 0) {
+                rawProgress = Math.max(0, Math.min(1, sy / scrollable));
+            } else {
+                rawProgress = 0;
+            }
+
+            const reducedMotion = mql.matches;
+
+            if (reducedMotion) {
+                displayProgress = rawProgress;
+                smoothX = mouseX;
+                smoothY = mouseY;
+            } else {
+                // Toned down easing: 0.012 creates a very tight, responsive feel.
+                // It smooths out mouse wheel steps perfectly, but stops FAST when you stop scrolling.
+                // It absolutely will not glide on its own.
+                const scrollSmoothFactor = 1 - Math.exp(-dt * 0.012);
+                const cursorSmoothFactor = 1 - Math.exp(-dt * 0.008);
+
+                displayProgress += (rawProgress - displayProgress) * scrollSmoothFactor;
+                smoothX += (mouseX - smoothX) * cursorSmoothFactor;
+                smoothY += (mouseY - smoothY) * cursorSmoothFactor;
+            }
+
+            // Frame Blending for 180 FPS perceived smoothness
+            const exactFrame = displayProgress * (frameCount - 1);
+            const frameIndex = Math.floor(exactFrame);
+            const nextFrameIndex = Math.min(frameCount - 1, frameIndex + 1);
+            const fraction = exactFrame - frameIndex;
+
+            const img1 = images[frameIndex];
+            const img2 = images[nextFrameIndex];
+
+            if (img1 && img1.complete && img1.naturalHeight !== 0) {
+                vCtx.clearRect(0, 0, 1280, 720);
+                vCtx.globalAlpha = 1.0;
+                vCtx.drawImage(img1, 0, 0, 1280, 720);
+                
+                // Opacity blending absorbs the low frame count of the video into fluid motion
+                if (fraction > 0.01 && img2 && img2.complete && img2.naturalHeight !== 0) {
+                    vCtx.globalAlpha = fraction;
+                    vCtx.drawImage(img2, 0, 0, 1280, 720);
+                }
+                vCtx.globalAlpha = 1.0; 
+            }
+
+            // --- CURSOR OVERLAY LOGIC ---
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+            
+            const cx = canvas.width / 2;
+            const cy = canvas.height / 2;
+            const maxDist = Math.hypot(cx, cy);
+            const vignette = ctx.createRadialGradient(cx, cy, 0, cx, cy, maxDist);
+            vignette.addColorStop(0, 'rgba(0,0,0,0)');
+            vignette.addColorStop(1, 'rgba(0,0,0,0.55)');
+            ctx.fillStyle = vignette;
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            if (!reducedMotion) {
+                const spotlight = ctx.createRadialGradient(smoothX, smoothY, 0, smoothX, smoothY, 380);
+                spotlight.addColorStop(0, 'rgba(255, 220, 100, 0.18)');
+                spotlight.addColorStop(1, 'rgba(0,0,0,0)');
+                ctx.fillStyle = spotlight;
+                ctx.fillRect(0, 0, canvas.width, canvas.height);
+            }
+
+            ctx.beginPath();
+            ctx.moveTo(smoothX - 14, smoothY);
+            ctx.lineTo(smoothX + 14, smoothY);
+            ctx.moveTo(smoothX, smoothY - 14);
+            ctx.lineTo(smoothX, smoothY + 14);
+            ctx.strokeStyle = 'rgba(255,215,0,0.7)';
+            ctx.lineWidth = 1.2;
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.arc(smoothX, smoothY, 4, 0, Math.PI * 2);
+            ctx.stroke();
+
+            arc.style.strokeDashoffset = circ - (circ * displayProgress);
+            frameDisplay.textContent = frameIndex;
+
+            requestAnimationFrame(loop);
+        }
+
+        requestAnimationFrame(loop);
+    </script>
+</body>
+</html>
